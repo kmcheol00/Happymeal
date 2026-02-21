@@ -5,6 +5,7 @@
 # Streamlit Cloud 배포 시 menu/ 폴더를 GitHub에 함께 push할 것
 # 절대경로 하드코딩 금지: Path(__file__).parent 사용
 #
+#   pip install streamlit pandas streamlit-gsheets-connection
 # ── 로컬 실행 ──
 #   streamlit run app.py
 #
@@ -32,34 +33,122 @@
 # =============================================================
 
 import io
+import json as _json
+import time as _time
+import os as _os
+
+# #region agent debug log helper
+def _dbg(loc, msg, data=None, hyp=None):
+    _e = {"sessionId": "b17557", "timestamp": int(_time.time() * 1000),
+          "location": loc, "message": msg, "data": data or {}, "hypothesisId": hyp}
+    _line = _json.dumps(_e, ensure_ascii=False) + "\n"
+    for _log in [
+        r"C:\Users\mincheol\OneDrive\keti\TEM\TES\Tem_defect_project\debug-b17557.log",
+        r"C:\Users\mincheol\AppData\Local\Temp\debug-b17557.log",
+    ]:
+        try:
+            with open(_log, "a", encoding="utf-8") as _f:
+                _f.write(_line)
+        except Exception:
+            pass
+# #endregion
+
+# #region agent log: app startup context (H-A, H-C, H-D)
+# 식당별 메뉴 목록 (식당명: [메뉴1, 메뉴2, ...])
+RESTAURANTS: dict[str, list[str]] = {
+    "한솥도시락": ["제육볶음도시락", "참치마요도시락", "순살치킨도시락"],
+    "김밥천국":   ["참치김밥", "치즈라면", "돈까스", "비빔밥"],
+    "맘스터치":   ["싸이버거", "불싸이버거", "맘스오리지널"],
+    "본죽":       ["전복죽", "참치야채죽", "소고기죽", "닭죽"],
+# 모바일 화면에서 버튼이 가득 채워지고,
+# 카드에 테두리·그림자가 적용되도록 스타일 설정
+}
+
+_dbg("app.py:top", "앱 시작", {
+    "__name__": __name__,
+    "pid": _os.getpid(),
+    "STREAMLIT_GUARD": _os.environ.get("_ST_GUARD", "없음"),
+    "cwd": _os.getcwd(),
+}, hyp="A,C,D")
+# #endregion
+
+_dbg("app.py:before_st_import", "streamlit import 시도 전", {}, hyp="A")
+from streamlit_gsheets import GSheetsConnection
 import streamlit as st
+_dbg("app.py:after_st_import", "streamlit import 성공", {}, hyp="A")
+
+# #region agent log: individual imports (H-E)
+_dbg("app.py:before_pandas", "pandas import 시도", {}, hyp="E")
 import pandas as pd
+_dbg("app.py:after_pandas", "pandas import 성공", {}, hyp="E")
+
 from datetime import datetime
 from pathlib import Path
+
+_dbg("app.py:before_PIL", "PIL import 시도", {}, hyp="E")
 from PIL import Image
-from streamlit_gsheets import GSheetsConnection
+_dbg("app.py:after_PIL", "PIL import 성공", {}, hyp="E")
+# #endregion
+
+# #region agent log: gsheets import (H-B)
+_dbg("app.py:before_gsheets_import", "streamlit_gsheets import 시도 전", {}, hyp="B")
+try:
+    from streamlit_gsheets import GSheetsConnection
+    _dbg("app.py:gsheets_import_ok", "streamlit_gsheets import 성공", {}, hyp="B")
+except Exception as _e:
+    _dbg("app.py:gsheets_import_fail", "streamlit_gsheets import 실패", {"error": str(_e)}, hyp="B")
+    raise
+# #endregion
 
 # ─────────────────────────────────────────────
 # 페이지 기본 설정 (모바일 친화적 centered 레이아웃)
 # ─────────────────────────────────────────────
-st.set_page_config(
-    page_title="🍱 점심 주문 취합",
-    page_icon="🍱",
-    layout="centered",
-)
+# #region agent log: set_page_config (H-A)
+_dbg("app.py:before_set_page_config", "st.set_page_config 호출 직전 - Streamlit 컨텍스트 확인", {}, hyp="A")
+try:
+    st.set_page_config(
+        page_title="🍱 점심 주문 취합",
+        page_icon="🍱",
+        layout="centered",
+    )
+    _dbg("app.py:set_page_config_ok", "st.set_page_config 성공", {}, hyp="A")
+except Exception as _e:
+    _dbg("app.py:set_page_config_fail", "st.set_page_config 예외 발생", {"error": str(_e), "type": type(_e).__name__}, hyp="A")
+    raise
+# #endregion
 
 # ─────────────────────────────────────────────
 # 전역 상수 정의
 # ─────────────────────────────────────────────
 COLUMNS = ["이름", "메뉴", "식당", "주문시간"]  # Google Sheets 컬럼 순서
-MENU_DIR = Path(__file__).parent / "menu"       # 식당별 이미지 폴더 루트
+MENU_DIR = Path(__file__).parent                # app.py가 menu/ 안에 위치하므로 parent가 곧 메뉴 루트
 AUTO_CLEAR_HOURS = 3                            # 주문 자동 만료 시간(시)
+
+# #region agent log: path & secrets check (H-B, H-D)
+_secrets_path = MENU_DIR / ".streamlit" / "secrets.toml"
+_dbg("app.py:constants", "경로 및 secrets 확인", {
+    "MENU_DIR": str(MENU_DIR),
+    "secrets_exists": _secrets_path.exists(),
+    "secrets_path": str(_secrets_path),
+}, hyp="B,D")
+# #endregion
 
 # ─────────────────────────────────────────────
 # Google Sheets 커넥션 초기화
 # credentials는 .streamlit/secrets.toml 에서 자동으로 읽어옴
 # ─────────────────────────────────────────────
-conn = st.connection("gsheets", type=GSheetsConnection)
+# #region agent log: gsheets connection (H-C)
+_dbg("app.py:before_conn", "st.connection 호출 직전", {}, hyp="C")
+try:
+    conn = st.connection("gsheets", type=GSheetsConnection)
+    _dbg("app.py:conn_ok", "st.connection 성공", {}, hyp="C")
+except Exception as _e:
+    _dbg("app.py:conn_fail", "st.connection 실패", {"error": str(_e), "type": type(_e).__name__}, hyp="C")
+if "confirm_delete" not in st.session_state:
+    st.session_state["confirm_delete"] = False  # 초기화 확인 단계 플래그
+
+    raise
+# #endregion
 
 # ─────────────────────────────────────────────
 # 커스텀 CSS 주입
@@ -97,6 +186,7 @@ div.stButton > button:hover {
     box-shadow: 0 2px 6px rgba(0,0,0,0.08);
     text-align: center;
 }
+        # 시트가 완전히 비어 있거나 컬럼이 없을 경우
 .menu-card img {
     border-radius: 8px;
     width: 100%;
@@ -104,6 +194,18 @@ div.stButton > button:hover {
 }
 .menu-name {
     font-size: 0.6rem;
+# ─────────────────────────────────────────────
+# 헬퍼 함수: Google Sheets 전체 초기화
+# 헤더만 남기고 빈 DataFrame으로 덮어씀
+
+# ─────────────────────────────────────────────
+def reset_gsheet() -> None:
+    """Google Sheets의 모든 주문 데이터를 삭제한다."""
+    try:
+        empty_df = pd.DataFrame(columns=COLUMNS)
+        conn.update(data=empty_df)
+    except Exception:
+        st.error("⚠️ Google Sheets 연결에 실패했습니다. 잠시 후 다시 시도해주세요.")
     font-weight: 700;
     margin: 6px 0 4px 0;
     color: #333;
@@ -121,6 +223,7 @@ div.stButton > button:hover {
 
 /* ── 섹션 구분선 ── */
 .section-divider {
+
     border: none;
     border-top: 2px dashed #DEE2E6;
     margin: 24px 0;
@@ -224,10 +327,11 @@ def delete_my_order_from_gsheet(name: str) -> bool:
 def scan_restaurants() -> dict[str, list[str]]:
     """menu/ 하위 폴더명=식당명, 이미지 파일명=메뉴명으로 구조를 스캔한다."""
     if not MENU_DIR.is_dir():
-        st.error(f"⚠️ menu/ 폴더가 없습니다. ({MENU_DIR})")
+        st.error(f"⚠️ 식당 이미지 폴더를 찾을 수 없습니다. ({MENU_DIR})")
         st.stop()
     result: dict[str, list[str]] = {}
     for folder in sorted(MENU_DIR.iterdir()):
+st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
         if not folder.is_dir():
             continue
         images = sorted(
@@ -331,6 +435,44 @@ if st.session_state["user_name"]:
             st.session_state["last_order_msg"] = (
                 "success",
                 f"🗑️ {cancel_name}님의 주문이 취소되었습니다.",
+
+
+# ─────────────────────────────────────────────
+# 섹션 4: 전체 초기화
+# 실수 방지를 위해 2단계 확인 (session_state 플래그 활용)
+# ─────────────────────────────────────────────
+st.subheader("🗑️ 전체 초기화")
+
+if not st.session_state["confirm_delete"]:
+    # 1단계: 초기화 버튼 (빨간 계열 스타일)
+    st.markdown('<div class="delete-btn">', unsafe_allow_html=True)
+    if st.button("🗑️ 전체 주문 초기화"):
+        # 확인 단계로 진입
+        st.session_state["confirm_delete"] = True
+        st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+else:
+    # 2단계: 정말 삭제할지 확인하는 단계
+    st.warning("⚠️ 정말로 모든 주문을 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.")
+    col_yes, col_no = st.columns(2)
+
+    with col_yes:
+        st.markdown('<div class="delete-btn">', unsafe_allow_html=True)
+        if st.button("✅ 예, 삭제합니다"):
+            # Google Sheets를 빈 DataFrame으로 덮어써서 초기화
+            reset_gsheet()
+            # 확인 플래그 초기화
+            st.session_state["confirm_delete"] = False
+            st.success("모든 주문이 초기화되었습니다.")
+            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with col_no:
+        if st.button("❌ 취소"):
+            # 삭제 취소 — 확인 플래그만 리셋
+            st.session_state["confirm_delete"] = False
+            st.rerun()
+
             )
             st.rerun()
     st.markdown('</div>', unsafe_allow_html=True)
@@ -388,6 +530,9 @@ for tab, (restaurant, img_paths) in zip(tabs, restaurants.items()):
 
 st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
 
+    subprocess.run(
+        [sys.executable, "-m", "streamlit", "run", __file__] + sys.argv[1:]
+    )
 
 # ─────────────────────────────────────────────
 # 섹션 3: 주문 현황 (전체 목록 + 집계)
@@ -428,3 +573,26 @@ else:
         use_container_width=True,
         hide_index=True,
     )
+
+    subprocess.run(
+        [sys.executable, "-m", "streamlit", "run", __file__] + sys.argv[1:]
+    )
+if __name__ == "__main__":
+    import subprocess
+    import sys
+
+    # #region agent log: __main__ block triggered (H-C)
+    _dbg("app.py:__main__", "__main__ 블록 진입", {
+        "GUARD_env": _os.environ.get("_ST_GUARD", "없음"),
+        "will_launch": not bool(_os.environ.get("_ST_GUARD")),
+        "pid": _os.getpid(),
+    }, hyp="C")
+    # #endregion
+
+    if not _os.environ.get("_ST_GUARD"):
+        env = _os.environ.copy()
+        env["_ST_GUARD"] = "1"
+        subprocess.run(
+            [sys.executable, "-m", "streamlit", "run", __file__] + sys.argv[1:],
+            env=env,
+        )
