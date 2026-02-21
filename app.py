@@ -1,8 +1,11 @@
 # =============================================================
 # 사내 점심 주문 집계 앱 (Streamlit + Google Sheets)
 #
+# pip install streamlit pandas streamlit-gsheets-connection Pillow
+# Streamlit Cloud 배포 시 menu/ 폴더를 GitHub에 함께 push할 것
+# 절대경로 하드코딩 금지: Path(__file__).parent 사용
+#
 # ── 로컬 실행 ──
-#   pip install streamlit pandas streamlit-gsheets-connection
 #   streamlit run app.py
 #
 # ── Streamlit Cloud 배포 (24시간 무료 서비스) ──
@@ -28,9 +31,12 @@
 # token_uri = "https://oauth2.googleapis.com/token"
 # =============================================================
 
+import io
 import streamlit as st
 import pandas as pd
 from datetime import datetime
+from pathlib import Path
+from PIL import Image
 from streamlit_gsheets import GSheetsConnection
 
 # ─────────────────────────────────────────────
@@ -46,14 +52,8 @@ st.set_page_config(
 # 전역 상수 정의
 # ─────────────────────────────────────────────
 COLUMNS = ["이름", "메뉴", "식당", "주문시간"]  # Google Sheets 컬럼 순서
-
-# 식당별 메뉴 목록 (식당명: [메뉴1, 메뉴2, ...])
-RESTAURANTS: dict[str, list[str]] = {
-    "한솥도시락": ["제육볶음도시락", "참치마요도시락", "순살치킨도시락"],
-    "김밥천국":   ["참치김밥", "치즈라면", "돈까스", "비빔밥"],
-    "맘스터치":   ["싸이버거", "불싸이버거", "맘스오리지널"],
-    "본죽":       ["전복죽", "참치야채죽", "소고기죽", "닭죽"],
-}
+MENU_DIR = Path(__file__).parent / "menu"       # 식당별 이미지 폴더 루트
+AUTO_CLEAR_HOURS = 3                            # 주문 자동 만료 시간(시)
 
 # ─────────────────────────────────────────────
 # Google Sheets 커넥션 초기화
@@ -63,8 +63,6 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 
 # ─────────────────────────────────────────────
 # 커스텀 CSS 주입
-# 모바일 화면에서 버튼이 가득 채워지고,
-# 카드에 테두리·그림자가 적용되도록 스타일 설정
 # ─────────────────────────────────────────────
 st.markdown("""
 <style>
@@ -76,8 +74,8 @@ html, body, [class*="css"] {
 /* ── 버튼 full-width 및 스타일 ── */
 div.stButton > button {
     width: 100%;
-    padding: 0.6rem 0.4rem;
-    font-size: 0.95rem;
+    padding: 0.3rem 0.2rem;
+    font-size: 0.6rem;
     font-weight: 600;
     border-radius: 10px;
     border: 1.5px solid #4A90D9;
@@ -94,8 +92,8 @@ div.stButton > button:hover {
     background: #FFFFFF;
     border: 1px solid #DEE2E6;
     border-radius: 12px;
-    padding: 10px;
-    margin-bottom: 14px;
+    padding: 6px;
+    margin-bottom: 10px;
     box-shadow: 0 2px 6px rgba(0,0,0,0.08);
     text-align: center;
 }
@@ -105,9 +103,9 @@ div.stButton > button:hover {
     object-fit: cover;
 }
 .menu-name {
-    font-size: 0.9rem;
+    font-size: 0.6rem;
     font-weight: 700;
-    margin: 8px 0 6px 0;
+    margin: 6px 0 4px 0;
     color: #333;
 }
 
@@ -137,6 +135,12 @@ div.delete-btn > button {
 div.delete-btn > button:hover {
     background-color: #FDDEDE;
 }
+
+/* ── 4열 그리드 모바일 강제 유지 ── */
+[data-testid="column"] {
+    min-width: 0 !important;
+    flex: 1 1 0% !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -150,6 +154,9 @@ if "user_name" not in st.session_state:
 if "last_order_msg" not in st.session_state:
     st.session_state["last_order_msg"] = None   # 마지막 주문 완료 메시지
 
+if "_last_auto_clear" not in st.session_state:
+    st.session_state["_last_auto_clear"] = None  # auto_clear 마지막 실행 시각
+
 
 # ─────────────────────────────────────────────
 # 헬퍼 함수: Google Sheets에서 주문 목록 불러오기
@@ -159,15 +166,13 @@ def load_orders_from_gsheet() -> pd.DataFrame:
     """Google Sheets에서 주문 데이터를 읽어온다.
     시트가 비어 있거나 연결 실패 시 빈 DataFrame 반환."""
     try:
-        df = conn.read(
-            usecols=COLUMNS,
-            ttl=5,  # 5초마다 최신 데이터 반영
-        )
-        # Google Sheets는 빈 행을 포함하는 경우가 있어 제거
+        df = conn.read(ttl=5)
         df = df.dropna(how="all").reset_index(drop=True)
-        return df
+        existing_cols = [c for c in COLUMNS if c in df.columns]
+        if not existing_cols:
+            return pd.DataFrame(columns=COLUMNS)
+        return df[existing_cols].reindex(columns=COLUMNS)
     except Exception:
-        # 시트가 완전히 비어 있거나 컬럼이 없을 경우
         return pd.DataFrame(columns=COLUMNS)
 
 
@@ -210,6 +215,79 @@ def delete_my_order_from_gsheet(name: str) -> bool:
         st.error("⚠️ Google Sheets 연결에 실패했습니다. 잠시 후 다시 시도해주세요.")
         return False
 
+
+# ─────────────────────────────────────────────
+# 헬퍼 함수: menu/ 폴더를 스캔하여 식당-이미지경로 딕셔너리 반환
+# 앱 시작 시 1회만 실행 (cache_data)
+# ─────────────────────────────────────────────
+@st.cache_data
+def scan_restaurants() -> dict[str, list[str]]:
+    """menu/ 하위 폴더명=식당명, 이미지 파일명=메뉴명으로 구조를 스캔한다."""
+    if not MENU_DIR.is_dir():
+        st.error(f"⚠️ menu/ 폴더가 없습니다. ({MENU_DIR})")
+        st.stop()
+    result: dict[str, list[str]] = {}
+    for folder in sorted(MENU_DIR.iterdir()):
+        if not folder.is_dir():
+            continue
+        images = sorted(
+            str(p) for p in folder.iterdir()
+            if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
+        )
+        if images:
+            result[folder.name] = images
+    return result
+
+
+# ─────────────────────────────────────────────
+# 헬퍼 함수: 이미지를 300x300 정사각형으로 중앙 크롭하여 JPEG bytes 반환
+# 한글 경로 대응: Image.open(str(path))
+# ─────────────────────────────────────────────
+def load_square_image(path: Path) -> bytes:
+    """이미지를 300×300 중앙 크롭 JPEG bytes로 반환한다. 실패 시 회색 플레이스홀더."""
+    try:
+        img = Image.open(str(path)).convert("RGB")
+        w, h = img.size
+        side = min(w, h)
+        left = (w - side) // 2
+        top = (h - side) // 2
+        img = img.crop((left, top, left + side, top + side)).resize((300, 300))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG")
+        return buf.getvalue()
+    except Exception:
+        buf = io.BytesIO()
+        Image.new("RGB", (300, 300), (200, 200, 200)).save(buf, format="JPEG")
+        return buf.getvalue()
+
+
+# ─────────────────────────────────────────────
+# 헬퍼 함수: AUTO_CLEAR_HOURS 경과 주문 자동 삭제
+# 불필요한 API 호출 방지: 삭제할 행이 있을 때만 update
+# ─────────────────────────────────────────────
+def auto_clear_old_orders() -> None:
+    """주문 시간이 AUTO_CLEAR_HOURS 이상 경과한 행을 자동으로 삭제한다."""
+    df = load_orders_from_gsheet()
+    if df.empty:
+        return
+    now = datetime.now()
+    df["주문시간"] = pd.to_datetime(df["주문시간"])
+    fresh_df = df[now - df["주문시간"] < pd.Timedelta(hours=AUTO_CLEAR_HOURS)]
+    fresh_df = fresh_df.reset_index(drop=True)
+    if len(fresh_df) < len(df):
+        conn.update(data=fresh_df)
+
+
+# ─────────────────────────────────────────────
+# 앱 시작 시 오래된 주문 자동 정리 (5분에 1회 제한)
+# ─────────────────────────────────────────────
+_now = datetime.now()
+if (
+    st.session_state["_last_auto_clear"] is None
+    or (_now - st.session_state["_last_auto_clear"]).total_seconds() > 300
+):
+    auto_clear_old_orders()
+    st.session_state["_last_auto_clear"] = _now
 
 # ─────────────────────────────────────────────
 # 앱 상단: 타이틀 & 안내 문구
@@ -262,32 +340,35 @@ st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
 # 섹션 2: 식당별 메뉴 그리드
-# 식당마다 st.tabs로 구분하고, 메뉴를 2열 그리드로 배치
+# 식당마다 st.tabs로 구분하고, 메뉴를 4열 그리드로 배치
 # ─────────────────────────────────────────────
 st.subheader("🍽️ 메뉴 선택")
 
-tab_labels = list(RESTAURANTS.keys())
+restaurants = scan_restaurants()
+tab_labels = list(restaurants.keys())
 tabs = st.tabs(tab_labels)
 
-for tab, (restaurant, menus) in zip(tabs, RESTAURANTS.items()):
+for tab, (restaurant, img_paths) in zip(tabs, restaurants.items()):
     with tab:
-        # 메뉴 2열 그리드 배치
-        cols = st.columns(2)
-        for idx, menu in enumerate(menus):
-            col = cols[idx % 2]
+        # 메뉴 4열 그리드 배치
+        cols = st.columns(4)
+        for idx, img_path_str in enumerate(img_paths):
+            img_p = Path(img_path_str)
+            menu_name = img_p.stem
+            col = cols[idx % 4]
             with col:
-                # 메뉴 카드 (이미지 + 이름 + 주문 버튼)
+                # 메뉴 카드 (이미지 + 주문 버튼)
                 st.markdown('<div class="menu-card">', unsafe_allow_html=True)
-
-                # picsum.photos: seed로 메뉴마다 고정된 이미지 사용
-                image_url = f"https://picsum.photos/seed/{menu}/300/200"
-                st.image(image_url, caption=menu, use_container_width=True)
-
+                st.image(
+                    load_square_image(img_p),
+                    caption=menu_name,
+                    use_container_width=True,
+                )
                 st.markdown('</div>', unsafe_allow_html=True)
 
                 # 주문 버튼 — 고유 key로 각 버튼을 구분
-                btn_key = f"order_{restaurant}_{menu}"
-                if st.button(f"🛒 {menu} 담기", key=btn_key):
+                btn_key = f"order_{restaurant}_{menu_name}"
+                if st.button(f"🛒 {menu_name}", key=btn_key):
                     current_name = st.session_state["user_name"]
                     if not current_name:
                         # 이름 미입력 시 경고 메시지 세팅 후 재실행
@@ -297,10 +378,10 @@ for tab, (restaurant, menus) in zip(tabs, RESTAURANTS.items()):
                         st.rerun()
                     else:
                         # Google Sheets에 주문 저장 — 성공 시에만 성공 메시지 세팅 후 재실행
-                        if save_order_to_gsheet(current_name, menu, restaurant):
+                        if save_order_to_gsheet(current_name, menu_name, restaurant):
                             st.session_state["last_order_msg"] = (
                                 "success",
-                                f"✅ {current_name}님의 [{restaurant}] {menu} 주문이 완료되었습니다!",
+                                f"✅ {current_name}님의 [{restaurant}] {menu_name} 주문이 완료되었습니다!",
                             )
                             st.rerun()
                         # 실패 시 st.error는 save_order_to_gsheet 내부에서 이미 표시됨
@@ -347,4 +428,3 @@ else:
         use_container_width=True,
         hide_index=True,
     )
-
