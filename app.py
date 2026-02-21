@@ -147,9 +147,6 @@ div.delete-btn > button:hover {
 if "user_name" not in st.session_state:
     st.session_state["user_name"] = ""          # 입력된 사용자 이름
 
-if "confirm_delete" not in st.session_state:
-    st.session_state["confirm_delete"] = False  # 초기화 확인 단계 플래그
-
 if "last_order_msg" not in st.session_state:
     st.session_state["last_order_msg"] = None   # 마지막 주문 완료 메시지
 
@@ -178,8 +175,8 @@ def load_orders_from_gsheet() -> pd.DataFrame:
 # 헬퍼 함수: 주문 1건을 Google Sheets에 저장
 # 기존 데이터를 모두 읽은 뒤 새 행을 추가하여 전체를 덮어씀
 # ─────────────────────────────────────────────
-def save_order_to_gsheet(name: str, menu: str, restaurant: str) -> None:
-    """새 주문을 Google Sheets에 추가한다."""
+def save_order_to_gsheet(name: str, menu: str, restaurant: str) -> bool:
+    """새 주문을 Google Sheets에 추가한다. 성공 시 True, 실패 시 False 반환."""
     try:
         existing_df = load_orders_from_gsheet()
         new_row = pd.DataFrame([{
@@ -191,21 +188,27 @@ def save_order_to_gsheet(name: str, menu: str, restaurant: str) -> None:
         # 기존 데이터 뒤에 새 행을 붙여서 전체 시트를 업데이트
         updated_df = pd.concat([existing_df, new_row], ignore_index=True)
         conn.update(data=updated_df)
+        return True
     except Exception:
         st.error("⚠️ Google Sheets 연결에 실패했습니다. 잠시 후 다시 시도해주세요.")
+        return False
 
 
 # ─────────────────────────────────────────────
-# 헬퍼 함수: Google Sheets 전체 초기화
-# 헤더만 남기고 빈 DataFrame으로 덮어씀
+# 헬퍼 함수: 특정 사용자의 주문만 Google Sheets에서 삭제
+# conn.clear() 후 update()하여 하단 찌꺼기 행을 방지
 # ─────────────────────────────────────────────
-def reset_gsheet() -> None:
-    """Google Sheets의 모든 주문 데이터를 삭제한다."""
+def delete_my_order_from_gsheet(name: str) -> bool:
+    """해당 이름의 주문 행을 모두 삭제한다. 성공 시 True, 실패 시 False 반환."""
     try:
-        empty_df = pd.DataFrame(columns=COLUMNS)
-        conn.update(data=empty_df)
+        existing_df = load_orders_from_gsheet()
+        updated_df = existing_df[existing_df["이름"] != name].reset_index(drop=True)
+        conn.clear()
+        conn.update(data=updated_df)
+        return True
     except Exception:
         st.error("⚠️ Google Sheets 연결에 실패했습니다. 잠시 후 다시 시도해주세요.")
+        return False
 
 
 # ─────────────────────────────────────────────
@@ -241,6 +244,19 @@ if st.session_state["last_order_msg"]:
     # 한 번 표시 후 초기화 (다음 렌더링에서 중복 표시 방지)
     st.session_state["last_order_msg"] = None
 
+# 이름을 입력했을 때만 '내 주문 취소' 버튼 노출
+if st.session_state["user_name"]:
+    st.markdown('<div class="delete-btn">', unsafe_allow_html=True)
+    if st.button("❌ 내 주문 취소하기"):
+        cancel_name = st.session_state["user_name"]
+        if delete_my_order_from_gsheet(cancel_name):
+            st.session_state["last_order_msg"] = (
+                "success",
+                f"🗑️ {cancel_name}님의 주문이 취소되었습니다.",
+            )
+            st.rerun()
+    st.markdown('</div>', unsafe_allow_html=True)
+
 st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
 
 
@@ -274,19 +290,20 @@ for tab, (restaurant, menus) in zip(tabs, RESTAURANTS.items()):
                 if st.button(f"🛒 {menu} 담기", key=btn_key):
                     current_name = st.session_state["user_name"]
                     if not current_name:
-                        # 이름 미입력 시 경고
+                        # 이름 미입력 시 경고 메시지 세팅 후 재실행
                         st.session_state["last_order_msg"] = (
                             "warning", "⚠️ 이름을 먼저 입력해주세요!"
                         )
+                        st.rerun()
                     else:
-                        # Google Sheets에 주문 저장 후 성공 메시지
-                        save_order_to_gsheet(current_name, menu, restaurant)
-                        st.session_state["last_order_msg"] = (
-                            "success",
-                            f"✅ {current_name}님의 [{restaurant}] {menu} 주문이 완료되었습니다!",
-                        )
-                    # 메시지 표시를 위해 페이지 재실행
-                    st.rerun()
+                        # Google Sheets에 주문 저장 — 성공 시에만 성공 메시지 세팅 후 재실행
+                        if save_order_to_gsheet(current_name, menu, restaurant):
+                            st.session_state["last_order_msg"] = (
+                                "success",
+                                f"✅ {current_name}님의 [{restaurant}] {menu} 주문이 완료되었습니다!",
+                            )
+                            st.rerun()
+                        # 실패 시 st.error는 save_order_to_gsheet 내부에서 이미 표시됨
 
 st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
 
@@ -331,41 +348,3 @@ else:
         hide_index=True,
     )
 
-st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
-
-
-# ─────────────────────────────────────────────
-# 섹션 4: 전체 초기화
-# 실수 방지를 위해 2단계 확인 (session_state 플래그 활용)
-# ─────────────────────────────────────────────
-st.subheader("🗑️ 전체 초기화")
-
-if not st.session_state["confirm_delete"]:
-    # 1단계: 초기화 버튼 (빨간 계열 스타일)
-    st.markdown('<div class="delete-btn">', unsafe_allow_html=True)
-    if st.button("🗑️ 전체 주문 초기화"):
-        # 확인 단계로 진입
-        st.session_state["confirm_delete"] = True
-        st.rerun()
-    st.markdown('</div>', unsafe_allow_html=True)
-else:
-    # 2단계: 정말 삭제할지 확인하는 단계
-    st.warning("⚠️ 정말로 모든 주문을 삭제하시겠습니까? 이 작업은 되돌릴 수 없습니다.")
-    col_yes, col_no = st.columns(2)
-
-    with col_yes:
-        st.markdown('<div class="delete-btn">', unsafe_allow_html=True)
-        if st.button("✅ 예, 삭제합니다"):
-            # Google Sheets를 빈 DataFrame으로 덮어써서 초기화
-            reset_gsheet()
-            # 확인 플래그 초기화
-            st.session_state["confirm_delete"] = False
-            st.success("모든 주문이 초기화되었습니다.")
-            st.rerun()
-        st.markdown('</div>', unsafe_allow_html=True)
-
-    with col_no:
-        if st.button("❌ 취소"):
-            # 삭제 취소 — 확인 플래그만 리셋
-            st.session_state["confirm_delete"] = False
-            st.rerun()
